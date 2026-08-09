@@ -12,7 +12,7 @@ PY   := $(CURDIR)/backend/.venv/bin/python
 PIP  := $(CURDIR)/backend/.venv/bin/pip
 
 .DEFAULT_GOAL := help
-.PHONY: help install run dev web build test check quota health tailnet clean
+.PHONY: help install run dev web build test check probe quota health tailnet clean
 
 help: ## Show this help
 	@echo "aeroQ"
@@ -52,6 +52,9 @@ check: test build ## Tests plus a frontend build — run before committing
 tailnet: ## Run bound to this machine's Tailscale IP (reachable by your devices)
 	@test -n "$$(tailscale ip -4 2>/dev/null)" || { echo "Tailscale is not up."; exit 1; }
 	@$(MAKE) run HOST=$$(tailscale ip -4 | head -1) PORT=$(PORT)
+
+probe: ## Verify a live provider's response shape (spends 2 API calls, asks first)
+	cd backend && $(PY) scripts/probe.py $(FLIGHT) $(DATE)
 
 quota: ## Show the current API budget ledger
 	@curl -fsS http://127.0.0.1:$(PORT)/api/quota | $(PY) -m json.tool

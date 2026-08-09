@@ -28,3 +28,4 @@ frontend/.vite/
 .idea/
 *.swp
 .DS_Store
+backend/scripts/probe-output.json
