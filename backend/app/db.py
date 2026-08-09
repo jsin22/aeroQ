@@ -90,6 +90,10 @@ CREATE TABLE IF NOT EXISTS api_usage (
     day_key   TEXT NOT NULL,
     month_key TEXT NOT NULL,
     status    TEXT NOT NULL,
+    -- One operation can spend several calls: AirLabs pages through a large
+    -- airport. Storing the count keeps the ledger honest about what a single
+    -- logical request actually cost.
+    calls     INTEGER NOT NULL DEFAULT 1,
     detail    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_month ON api_usage(month_key, provider, status);
@@ -98,14 +102,23 @@ CREATE INDEX IF NOT EXISTS idx_usage_day ON api_usage(day_key, status);
 -- Router state is persisted so a crash loop cannot re-probe providers already
 -- known to be exhausted, which would burn the pooled budget on restarts.
 CREATE TABLE IF NOT EXISTS provider_state (
-    provider    TEXT PRIMARY KEY,
-    state       TEXT NOT NULL,
-    state_until INTEGER,
-    month_key   TEXT,
-    last_error  TEXT,
-    updated_at  INTEGER NOT NULL
+    provider      TEXT PRIMARY KEY,
+    state         TEXT NOT NULL,
+    state_until   INTEGER,
+    month_key     TEXT,
+    last_error    TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL
 );
 """
+
+# Columns added after the first release. This app is upgraded in place with
+# `git pull` on the GPD, so the database outlives any single version of the
+# schema and additive changes have to be applied on startup.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("api_usage", "calls", "INTEGER NOT NULL DEFAULT 1"),
+    ("provider_state", "failure_count", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 
 def _db_file() -> Path:
@@ -132,9 +145,17 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _apply_added_columns(conn: sqlite3.Connection) -> None:
+    for table, column, ddl in _ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _apply_added_columns(conn)
 
 
 # --- Time keys -------------------------------------------------------------
