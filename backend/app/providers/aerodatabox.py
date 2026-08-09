@@ -17,7 +17,9 @@ without spending budget to re-fetch.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -74,6 +76,51 @@ class AeroDataBoxProvider(ScheduleProvider):
         self.api_key = api_key if api_key is not None else settings.aerodatabox_api_key
         self.api_host = api_host or settings.aerodatabox_api_host
         self._client: httpx.AsyncClient | None = None
+        # Serialises requests and spaces them out; see _throttle().
+        self._rate_lock = asyncio.Lock()
+        self._last_request_at = 0.0
+        self.last_quota: dict[str, int] | None = None
+
+    async def _throttle(self) -> None:
+        """Space requests out to stay under the per-second rate limit.
+
+        Observed behaviour: two calls issued back to back return 429, while the
+        same second call succeeds after a short pause. Without this, ordinary
+        use — resolve a flight, then immediately fetch that airport's board —
+        trips the limit on essentially every cold request.
+        """
+        interval = settings.aerodatabox_min_request_interval
+        if interval <= 0:
+            return
+        async with self._rate_lock:
+            elapsed = time.monotonic() - self._last_request_at
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
+            self._last_request_at = time.monotonic()
+
+    @staticmethod
+    def _read_quota(headers) -> dict[str, int]:
+        """Pull RapidAPI's budget counters out of the response headers.
+
+        Two independent budgets are reported, and they are not interchangeable:
+        a 12-hour board costs 1 request but 2 units, so units run out roughly
+        four times sooner. Whichever is scarcer is the real limit.
+        """
+        out: dict[str, int] = {}
+        pairs = (
+            ("units_remaining", "x-ratelimit-api-units-remaining"),
+            ("units_limit", "x-ratelimit-api-units-limit"),
+            ("requests_remaining", "x-ratelimit-requests-remaining"),
+            ("requests_limit", "x-ratelimit-requests-limit"),
+        )
+        for key, header in pairs:
+            value = headers.get(header)
+            if value is not None:
+                try:
+                    out[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        return out
 
     @property
     def is_configured(self) -> bool:
@@ -96,10 +143,11 @@ class AeroDataBoxProvider(ScheduleProvider):
             await self._client.aclose()
             self._client = None
 
-    async def _request(self, path: str, params: dict | None = None) -> Any:
+    async def _request(self, path: str, params: dict | None = None, _retry: bool = True) -> Any:
         if not self.is_configured:
             raise ProviderAuthError("AERODATABOX_API_KEY is not set", self.name)
 
+        await self._throttle()
         try:
             resp = await self._get_client().get(path, params=params or {})
         except httpx.TimeoutException as exc:
@@ -107,10 +155,37 @@ class AeroDataBoxProvider(ScheduleProvider):
         except httpx.HTTPError as exc:
             raise ProviderTransientError(f"connection error: {exc}", self.name) from exc
 
-        # 429 is the backstop, not the primary quota signal — the local ledger
-        # should normally have stopped us before we got here (see router.py).
+        quota = self._read_quota(resp.headers)
+        if quota:
+            self.last_quota = quota
+
         if resp.status_code == 429:
-            raise ProviderQuotaExceeded("rate limit / quota exceeded", self.name)
+            # RapidAPI returns 429 for two completely different conditions, and
+            # conflating them is expensive: a per-second rate limit is transient
+            # and clears in a moment, whereas quota exhaustion is sticky for the
+            # month. Treating a burst as exhaustion would disable the provider
+            # for weeks over a momentary spike. The headers tell them apart —
+            # budget left means it was the rate limit.
+            units_left = quota.get("units_remaining")
+            requests_left = quota.get("requests_remaining")
+            has_budget = (units_left is None or units_left > 0) and (
+                requests_left is None or requests_left > 0
+            )
+
+            if has_budget:
+                if _retry:
+                    log.info("aerodatabox: rate limited, backing off once")
+                    await asyncio.sleep(settings.aerodatabox_min_request_interval * 2)
+                    return await self._request(path, params, _retry=False)
+                raise ProviderTransientError(
+                    f"rate limited (units left: {units_left}, requests left: {requests_left})",
+                    self.name,
+                )
+
+            raise ProviderQuotaExceeded(
+                f"monthly quota exhausted (units {units_left}, requests {requests_left})",
+                self.name,
+            )
         if resp.status_code in (401, 403):
             raise ProviderAuthError(f"auth rejected ({resp.status_code})", self.name)
         if resp.status_code == 404:
@@ -146,7 +221,8 @@ class AeroDataBoxProvider(ScheduleProvider):
             raise FlightNotFound(f"No flight {canonical} on {flight_date}", self.name)
 
         return ProviderResult(
-            provider=self.name, calls_used=1, resolutions=resolutions, raw=payload
+            provider=self.name, calls_used=1, resolutions=resolutions,
+            raw=payload, quota=self.last_quota,
         )
 
     def _map_resolution(
@@ -186,7 +262,18 @@ class AeroDataBoxProvider(ScheduleProvider):
             dep_time_local=parse_local_time(raw_time),
             arr_iata=str(arr) if arr else None,
             source_provider=self.name,
-            extra={"status": item.get("status"), "gate": dep.get("gate")},
+            extra={
+                "status": item.get("status"),
+                "gate": dep.get("gate"),
+                # The provider names airports our bundled list does not cover
+                # (small and regional fields), so keep it rather than falling
+                # back to showing the bare IATA code twice.
+                "dep_airport_name": _first_present(
+                    item,
+                    ("departure", "airport", "name"),
+                    ("movement", "airport", "name"),
+                ),
+            },
         )
 
     # --- Step 2 -----------------------------------------------------------
@@ -224,9 +311,11 @@ class AeroDataBoxProvider(ScheduleProvider):
                 iata,
             )
 
-        # One call for the whole window, regardless of flight count.
+        # One call for the whole window, regardless of flight count. Verified
+        # live: a 12-hour JFK block returned 391 departures for 1 request.
         return ProviderResult(
-            provider=self.name, calls_used=1, flights=flights, raw=payload
+            provider=self.name, calls_used=1, flights=flights,
+            raw=payload, quota=self.last_quota,
         )
 
     def _map_flight(self, item: dict, iata: str) -> NormalizedFlight | None:

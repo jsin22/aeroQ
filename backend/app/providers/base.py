@@ -78,6 +78,13 @@ class ProviderResult:
     partial: bool = False
     partial_reason: str | None = None
 
+    # Budget as the *provider* reports it, when it says so in response headers.
+    # This is authoritative in a way local counting cannot be: AeroDataBox
+    # meters "API units" that do not map one-to-one onto requests, so counting
+    # calls locally measures the wrong quantity entirely.
+    # Keys: units_remaining, units_limit, requests_remaining, requests_limit.
+    quota: dict[str, int] | None = None
+
 
 class ScheduleProvider(ABC):
     """One aviation data source.

@@ -173,8 +173,18 @@ def test_far_future_flight_uses_baseline_once_history_exists(client):
 
 # --- Manual prediction ------------------------------------------------------
 
-def _t(hours_ahead: int) -> str:
-    return (datetime.now() + timedelta(hours=hours_ahead)).strftime("%Y-%m-%dT%H:%M")
+def _t(_hours_ahead: int = 24) -> str:
+    """A departure time at a reliably busy hour.
+
+    Deliberately *not* `now + N hours`. That lands in the small hours for part
+    of the day, where the diurnal curve is near-dead and a terminal filter
+    legitimately matches zero flights — so the assertion's outcome depended on
+    what time the suite happened to run. Tomorrow morning is always busy.
+    """
+    tomorrow = datetime.now() + timedelta(days=1)
+    return tomorrow.replace(hour=9, minute=0, second=0, microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M"
+    )
 
 
 def _flight(when, terminal):

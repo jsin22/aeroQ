@@ -17,6 +17,20 @@ from app.config import get_settings, settings
 
 
 @pytest.fixture(autouse=True)
+def no_live_providers(monkeypatch):
+    """Blank every provider credential for the whole suite.
+
+    `settings` reads the real .env, so once a live key exists on the machine
+    the tests would build real providers and spend actual quota on every run.
+    Tests that want a live provider must set a key explicitly.
+    """
+    monkeypatch.setattr(settings, "aerodatabox_api_key", "")
+    monkeypatch.setattr(settings, "airlabs_api_key", "")
+    monkeypatch.setattr(settings, "provider_order", "mock")
+    monkeypatch.setattr(settings, "allow_mock_fallback", False)
+
+
+@pytest.fixture(autouse=True)
 def reset_airport_locks():
     """Drop the per-airport lock registry between tests.
 

@@ -145,11 +145,12 @@ def _build_response(
     *,
     flight: FlightInfo | None = None,
     calls_used: int = 0,
+    airport_name: str | None = None,
 ) -> PredictionResponse:
     return PredictionResponse(
         flight=flight,
         airport=prediction.airport,
-        airport_name=airports.display_name(prediction.airport),
+        airport_name=airports.display_name(prediction.airport, airport_name),
         terminal=prediction.terminal,
         scope=prediction.scope,
         confidence=prediction.confidence,
@@ -218,7 +219,9 @@ async def predict_flight(
                 "options": [
                     FlightOption(
                         dep_iata=r.dep_iata,
-                        dep_airport_name=airports.display_name(r.dep_iata),
+                        dep_airport_name=airports.display_name(
+                            r.dep_iata, r.extra.get("dep_airport_name")
+                        ),
                         dep_terminal=r.dep_terminal_norm,
                         departure_local=iso(r.dep_time_local),
                         arr_iata=r.arr_iata,
@@ -254,6 +257,7 @@ async def predict_flight(
             arrival_airport=leg.arr_iata,
         ),
         calls_used=outcome.calls_used + board.calls_used,
+        airport_name=leg.extra.get("dep_airport_name"),
     )
 
 

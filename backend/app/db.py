@@ -123,6 +123,13 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("api_usage", "calls", "INTEGER NOT NULL DEFAULT 1"),
     ("provider_state", "failure_count", "INTEGER NOT NULL DEFAULT 0"),
     ("terminal_density_history", "last_sample_date", "TEXT"),
+    # Budget as the provider itself reports it. AeroDataBox meters "API units"
+    # that do not map one-to-one onto requests, so counting calls locally
+    # measures the wrong quantity; these are authoritative.
+    ("provider_state", "units_remaining", "INTEGER"),
+    ("provider_state", "units_limit", "INTEGER"),
+    ("provider_state", "requests_remaining", "INTEGER"),
+    ("provider_state", "quota_synced_at", "INTEGER"),
 ]
 
 

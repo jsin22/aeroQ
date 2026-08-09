@@ -132,6 +132,7 @@ def _load_cached(flight_no: str, flight_date: str, now: datetime) -> list[Flight
             dep_time_local=parse_local_time(leg.get("dep_time_local")),
             arr_iata=leg.get("arr_iata"),
             source_provider=row["source_provider"],
+            extra={"dep_airport_name": leg.get("dep_airport_name")},
         )
         for leg in payload
     ]
@@ -148,6 +149,7 @@ def _store(resolutions: list[FlightResolution], now: datetime) -> None:
                     format_local_time(r.dep_time_local) if r.dep_time_local else None
                 ),
                 "arr_iata": r.arr_iata,
+                "dep_airport_name": r.extra.get("dep_airport_name"),
             }
             for r in resolutions
         ]

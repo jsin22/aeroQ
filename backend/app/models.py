@@ -128,6 +128,8 @@ class ProviderQuota(BaseModel):
     used_this_month: int
     remaining: int | None = None
     metered: bool
+    reported_remaining: int | None = None
+    reported_counter: str | None = None
 
 
 class QuotaResponse(BaseModel):

@@ -147,6 +147,31 @@ def mark_healthy(provider: str) -> None:
     _set_status(provider, HEALTHY)
 
 
+def record_quota(provider: str, quota: dict[str, int] | None) -> None:
+    """Store budget figures the provider reported in its response headers."""
+    if not quota:
+        return
+    with db.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO provider_state
+                (provider, state, units_remaining, units_limit,
+                 requests_remaining, quota_synced_at, updated_at)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(provider) DO UPDATE SET
+                units_remaining = excluded.units_remaining,
+                units_limit = excluded.units_limit,
+                requests_remaining = excluded.requests_remaining,
+                quota_synced_at = excluded.quota_synced_at
+            """,
+            (
+                provider, HEALTHY,
+                quota.get("units_remaining"), quota.get("units_limit"),
+                quota.get("requests_remaining"), db.now_ts(), db.now_ts(),
+            ),
+        )
+
+
 def mark_exhausted(provider: str, error: str) -> None:
     """Sticky for the current month — see module docstring."""
     _set_status(provider, EXHAUSTED, month=db.month_key(), error=error)
@@ -265,6 +290,7 @@ class ProviderRouter:
                 detail="partial" if result.partial else None,
             )
             mark_healthy(name)
+            record_quota(name, result.quota)
             return result
 
         raise AllProvidersUnavailable(reasons)

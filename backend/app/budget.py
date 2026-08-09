@@ -149,6 +149,38 @@ class BudgetDecision:
         return self.allowed
 
 
+def provider_reported_remaining(provider: str) -> tuple[int | None, str]:
+    """Budget the provider itself last reported, and which counter is scarcest.
+
+    Preferred over local counting where available. AeroDataBox meters "API
+    units" alongside requests, and they are not interchangeable — a 12-hour
+    board costs 1 request but 2 units, so units run out about four times
+    sooner. Counting calls locally measures the wrong quantity; the provider's
+    own figure does not drift.
+    """
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT units_remaining, requests_remaining, quota_synced_at
+            FROM provider_state WHERE provider = ?
+            """,
+            (provider,),
+        ).fetchone()
+
+    if row is None or row["quota_synced_at"] is None:
+        return None, "never synced"
+
+    candidates = []
+    if row["units_remaining"] is not None:
+        candidates.append((row["units_remaining"], "units"))
+    if row["requests_remaining"] is not None:
+        candidates.append((row["requests_remaining"], "requests"))
+    if not candidates:
+        return None, "no counters reported"
+
+    return min(candidates)
+
+
 def check(provider: str, providers: list[str], now: datetime | None = None) -> BudgetDecision:
     """Can `provider` spend at least one call right now?
 
@@ -162,6 +194,16 @@ def check(provider: str, providers: list[str], now: datetime | None = None) -> B
     """
     if not is_metered(provider):
         return BudgetDecision(True)
+
+    # The provider's own figure wins when we have one — see
+    # provider_reported_remaining().
+    reported, counter = provider_reported_remaining(provider)
+    if reported is not None and reported <= settings.provider_quota_reserve:
+        return BudgetDecision(
+            False,
+            f"{provider} reports only {reported} {counter} left this month "
+            f"(reserve {settings.provider_quota_reserve}); cached airports still work",
+        )
 
     remaining = provider_remaining(provider, now)
     if remaining <= 0:
@@ -197,6 +239,10 @@ def snapshot(providers: list[str], now: datetime | None = None) -> dict:
                 "used_this_month": monthly_used(p, now),
                 "remaining": provider_remaining(p, now),
                 "metered": True,
+                # What the provider last told us, which supersedes the local
+                # count when present.
+                "reported_remaining": provider_reported_remaining(p)[0],
+                "reported_counter": provider_reported_remaining(p)[1],
             }
             for p in metered
         ]

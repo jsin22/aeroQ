@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
     aerodatabox_api_key: str = ""
     aerodatabox_api_host: str = "aerodatabox.p.rapidapi.com"
+    # Minimum seconds between AeroDataBox requests. Its per-second rate limit
+    # rejects back-to-back calls, and resolve-then-fetch is the normal path.
+    aerodatabox_min_request_interval: float = 1.2
+    # Stop this far short of the provider-reported budget, so the last calls of
+    # the month are ours to spend rather than lost to an off-by-one.
+    provider_quota_reserve: int = 10
     airlabs_api_key: str = ""
 
     # Mock is dropped automatically once a real provider is configured, so that

@@ -55,9 +55,16 @@ def lookup(iata: str | None) -> dict | None:
     }
 
 
-def display_name(iata: str | None) -> str:
+def display_name(iata: str | None, fallback: str | None = None) -> str | None:
+    """Human-readable airport name, or None if we genuinely do not have one.
+
+    Returning the IATA code here would render as "POS · POS" in the UI. None
+    lets the caller show the code once.
+    """
     info = lookup(iata)
-    return info["name"] if info else (iata or "").upper()
+    if info:
+        return info["name"]
+    return fallback or None
 
 
 class UnknownAirportError(ValueError):
