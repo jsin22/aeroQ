@@ -72,11 +72,15 @@ CREATE TABLE IF NOT EXISTS flight_terminal_history (
 
 CREATE TABLE IF NOT EXISTS terminal_density_history (
     iata          TEXT NOT NULL,
-    terminal_norm TEXT NOT NULL,
+    terminal_norm TEXT NOT NULL,   -- '*' is the whole-airport aggregate
     day_of_week   INTEGER NOT NULL,
     hour          INTEGER NOT NULL,
     avg_flights   REAL NOT NULL,
     sample_count  INTEGER NOT NULL,
+    -- Boards are refetched every 4h and each covers 12h, so the same calendar
+    -- hour arrives repeatedly. Recording the source date lets a re-observation
+    -- be skipped, keeping sample_count an honest count of distinct days.
+    last_sample_date TEXT,
     PRIMARY KEY (iata, terminal_norm, day_of_week, hour)
 );
 
@@ -118,6 +122,7 @@ CREATE TABLE IF NOT EXISTS provider_state (
 _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("api_usage", "calls", "INTEGER NOT NULL DEFAULT 1"),
     ("provider_state", "failure_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("terminal_density_history", "last_sample_date", "TEXT"),
 ]
 
 

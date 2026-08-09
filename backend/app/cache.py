@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import budget, db
+from . import budget, db, history
 from .config import settings
 from .normalize import NormalizedFlight, format_local_time, parse_local_time
 from .router import AllProvidersUnavailable, ProviderRouter
@@ -258,6 +258,15 @@ async def get_board(
             result.provider,
             result.raw,
         )
+
+        # Fold the board into the corpus. This is the only place it grows, and
+        # it costs nothing: the data was already fetched and stored. A corpus
+        # failure must never fail the request that paid for the data.
+        try:
+            history.record_board(iata, result.flights, window_start, window_end)
+            history.record_terminals(result.flights)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("failed to update history corpus for %s", iata)
         return BoardResult(
             iata=iata,
             flights=result.flights,
