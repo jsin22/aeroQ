@@ -1,0 +1,44 @@
+# aeroQ backend.
+#
+#   sudo cp deploy/aeroq.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aeroq
+#
+# Bound to 127.0.0.1 on purpose: Tailscale Funnel is the only route in, so the
+# app is never listening on the LAN or on any other interface.
+
+[Unit]
+Description=aeroQ — airport security wait estimates
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jsin
+Group=jsin
+WorkingDirectory=/home/jsin/dev/aeroQ/backend
+EnvironmentFile=-/home/jsin/dev/aeroQ/.env
+ExecStart=/home/jsin/dev/aeroQ/backend/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8000 --workers 1
+
+# One worker, deliberately. The per-airport locks that collapse concurrent
+# requests into a single API call are in-process; a second worker would have
+# its own set and could double-spend the budget on the same airport.
+
+Restart=always
+RestartSec=5
+
+# The database is the only state, and it holds the accumulated corpus, which
+# cannot be re-fetched without spending quota.
+ReadWritePaths=/home/jsin/dev/aeroQ/backend/data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aeroq
+
+[Install]
+WantedBy=multi-user.target

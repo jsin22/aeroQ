@@ -1,0 +1,19 @@
+services:
+  aeroq:
+    build: .
+    ports:
+      # Bound to loopback: Tailscale Funnel is the intended route in.
+      - "127.0.0.1:8000:8000"
+    env_file:
+      # Optional: with no keys the app runs on the mock provider, so a fresh
+      # clone comes up without any configuration at all.
+      - path: .env
+        required: false
+    volumes:
+      # The database holds the accumulated corpus, which cannot be re-fetched
+      # without spending API quota. It must outlive the container.
+      - aeroq-data:/app/backend/data
+    restart: unless-stopped
+
+volumes:
+  aeroq-data:
