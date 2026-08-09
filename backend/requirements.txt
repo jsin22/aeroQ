@@ -1,0 +1,13 @@
+# Pinned against Python 3.14 (the GPD Pocket's Fedora 43 system Python).
+# Earlier pydantic pins were dropped: pydantic-core has no prebuilt wheel for
+# 3.14 below 2.12, and building it from source needs a Rust toolchain.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+httpx==0.28.1
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-dotenv==1.2.2
+
+# Dev / test
+pytest==9.1.1
+pytest-asyncio==1.4.0
