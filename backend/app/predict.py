@@ -301,13 +301,13 @@ def predict(
         )
 
     # --- Level 5 ---
+    # Say why *and* what to do. The board's own note explains the cause
+    # precisely ("more than 7 days out"), but on its own it leaves the user
+    # with no next step.
+    cause = board.note or "No departure schedule is published for that date yet"
     raise PredictionUnavailable(
-        board.note
-        or (
-            "No departure schedule is available for that date yet, and there is "
-            "not enough history for this airport to estimate from. Check back "
-            "closer to your flight."
-        )
+        f"{cause}, and there is not enough history for {airport} to estimate "
+        "from yet. Check back closer to your flight."
     )
 
 
