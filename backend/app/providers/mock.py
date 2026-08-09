@@ -30,6 +30,7 @@ from ..normalize import (
     NormalizedFlight,
     normalize_terminal,
     parse_flight_number,
+    split_flight_number,
 )
 from .base import FlightNotFound, ProviderResult, ScheduleProvider
 
@@ -131,12 +132,15 @@ class MockProvider(ScheduleProvider):
 
     # --- Step 1 -----------------------------------------------------------
     async def resolve_flight(self, flight_no: str, flight_date: str) -> ProviderResult:
-        canonical = parse_flight_number(flight_no)
-        if not canonical:
+        parts = split_flight_number(flight_no)
+        if not parts:
             raise FlightNotFound(f"{flight_no!r} is not a valid flight number", self.name)
 
-        airline = "".join(c for c in canonical if c.isalpha())
-        number = int("".join(c for c in canonical if c.isdigit()))
+        # Split via the parser rather than by character class: "B62018" is
+        # airline B6 flight 2018, but isalpha()/isdigit() would read it as
+        # airline "B" flight 62018.
+        airline, number, _suffix = parts
+        canonical = parse_flight_number(flight_no)
 
         if number >= 9000:
             raise FlightNotFound(f"No flight {canonical} on {flight_date}", self.name)

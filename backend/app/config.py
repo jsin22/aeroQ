@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     aerodatabox_api_host: str = "aerodatabox.p.rapidapi.com"
     airlabs_api_key: str = ""
 
+    # Mock is dropped automatically once a real provider is configured, so that
+    # invented schedules can never stand in for real ones. Set true only to
+    # deliberately test the mock path alongside live keys.
+    allow_mock_fallback: bool = False
+
     # --- Budget ------------------------------------------------------------
     # Deliberately below the real free tiers so we stop before the provider does.
     aerodatabox_monthly_cap: int = 250

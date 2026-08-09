@@ -157,6 +157,29 @@ def test_build_providers_ignores_unknown_names():
     assert [p.name for p in built] == ["mock"]
 
 
+def test_mock_is_dropped_once_a_real_provider_is_configured(monkeypatch):
+    """Invented schedules must never stand in for real ones.
+
+    Leaving mock at the end of the chain would mean an exhausted or
+    unreachable real provider silently falls through to fabricated flights
+    presented as a genuine prediction.
+    """
+    monkeypatch.setattr("app.config.settings.airlabs_api_key", "test-key")
+    built = build_providers(["airlabs", "mock"])
+    assert [p.name for p in built] == ["airlabs"]
+
+
+def test_mock_fallback_can_be_opted_into(monkeypatch):
+    monkeypatch.setattr("app.config.settings.airlabs_api_key", "test-key")
+    built = build_providers(["airlabs", "mock"], allow_mock_fallback=True)
+    assert [p.name for p in built] == ["airlabs", "mock"]
+
+
+def test_mock_survives_when_it_is_the_only_provider():
+    """Zero-config development mode stays supported."""
+    assert [p.name for p in build_providers(["aerodatabox", "mock"])] == ["mock"]
+
+
 def test_capability_flags_are_declared():
     for provider in build_providers(["mock"]):
         assert isinstance(provider.supports_flight_lookup, bool)

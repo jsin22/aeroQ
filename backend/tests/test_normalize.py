@@ -17,6 +17,7 @@ from app.normalize import (
     normalize_terminal,
     parse_flight_number,
     parse_local_time,
+    split_flight_number,
 )
 
 
@@ -110,6 +111,37 @@ def test_parse_flight_number_valid(raw, expected):
 
 
 @pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # IATA designators containing a digit. These are what is printed on the
+        # ticket, and a letters-only pattern rejects every one of them.
+        ("B62018", "B62018"),      # JetBlue
+        ("b6 2018", "B62018"),
+        ("B6-2018", "B62018"),
+        ("9W123", "9W123"),        # Jet Airways
+        ("6E5301", "6E5301"),      # IndiGo
+        ("U21234", "U21234"),      # easyJet
+        ("3U8888", "3U8888"),      # Sichuan
+        ("W6501", "W6501"),        # Wizz
+    ],
+)
+def test_alphanumeric_airline_designators(raw, expected):
+    assert parse_flight_number(raw) == expected
+
+
+def test_iata_and_icao_forms_of_one_flight_both_parse():
+    """B6 2018 and JBU2018 are the same JetBlue flight, differently designated."""
+    assert split_flight_number("B62018") == ("B6", 2018, "")
+    assert split_flight_number("JBU2018") == ("JBU", 2018, "")
+
+
+def test_designator_is_not_read_greedily():
+    """A widened [A-Z0-9]{2,3} would read B62018 as airline 'B62', flight 018."""
+    assert split_flight_number("B62018")[0] == "B6"
+    assert split_flight_number("B62018")[1] == 2018
+
+
+@pytest.mark.parametrize(
     "raw",
     [
         "",
@@ -118,6 +150,7 @@ def test_parse_flight_number_valid(raw, expected):
         "123",
         "U1",
         "UNITED 123",
+        "11123",  # digit-digit designators are not issued
         "UA",
         "UA12345",
         "!!",

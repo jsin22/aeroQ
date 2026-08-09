@@ -39,8 +39,18 @@ _TERMINAL_PREFIX_RE = re.compile(
 # so genuine letter terminals ("T" as a name) are left alone.
 _T_NUMERIC_RE = re.compile(r"^T[\s.\-]*(\d{1,2}[A-Z]?)$")
 
-# Airline designator + number: UA123, UA 123, ua-123, BAW1476.
-_FLIGHT_NO_RE = re.compile(r"^([A-Z]{2,3})[\s\-]*(\d{1,4})([A-Z]?)$")
+# Airline designator + number.
+#
+# IATA designators are two characters and **may contain a digit** — B6
+# (JetBlue), 9W, 6E, U2, 3U. A letters-only pattern rejects every one of them,
+# which matters because the IATA code is what is printed on the ticket. Only
+# the digit-digit combination is not issued, so it is not accepted here.
+#
+# ICAO designators are three letters (JBU, BAW, DLH) and are tried separately
+# rather than by widening the character class: a single `[A-Z0-9]{2,3}` would
+# greedily read "B62018" as airline "B62" + flight "018".
+_IATA_FLIGHT_RE = re.compile(r"^([A-Z]{2}|[A-Z]\d|\d[A-Z])[\s\-]*(\d{1,4})([A-Z]?)$")
+_ICAO_FLIGHT_RE = re.compile(r"^([A-Z]{3})[\s\-]*(\d{1,4})([A-Z]?)$")
 
 
 def normalize_terminal(raw: str | None) -> str | None:
@@ -82,6 +92,29 @@ def normalize_terminal(raw: str | None) -> str | None:
     return s
 
 
+def split_flight_number(raw: str | None) -> tuple[str, int, str] | None:
+    """Split a flight number into (airline, number, suffix), or None if malformed.
+
+    >>> split_flight_number("B62018")     # IATA, digit in the designator
+    ('B6', 2018, '')
+    >>> split_flight_number("JBU2018")    # the same flight, ICAO designator
+    ('JBU', 2018, '')
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+
+    s = re.sub(r"\s+", " ", raw).strip().upper()
+
+    # IATA first: it is what appears on tickets. The patterns cannot both match
+    # the same string, so the order is for clarity rather than correctness.
+    m = _IATA_FLIGHT_RE.match(s) or _ICAO_FLIGHT_RE.match(s)
+    if not m:
+        return None
+
+    airline, number, suffix = m.groups()
+    return airline, int(number), suffix or ""
+
+
 def parse_flight_number(raw: str | None) -> str | None:
     """Canonicalize a flight number, or return None if it is malformed.
 
@@ -89,25 +122,22 @@ def parse_flight_number(raw: str | None) -> str | None:
 
     >>> parse_flight_number("ua 123"), parse_flight_number("UA-123")
     ('UA123', 'UA123')
+    >>> parse_flight_number("b6 2018")
+    'B62018'
     >>> parse_flight_number("hello") is None
     True
     """
-    if not raw or not isinstance(raw, str):
+    parts = split_flight_number(raw)
+    if parts is None:
         return None
-
-    s = re.sub(r"\s+", " ", raw).strip().upper()
-    m = _FLIGHT_NO_RE.match(s)
-    if not m:
-        return None
-
-    airline, number, suffix = m.groups()
+    airline, number, suffix = parts
     # Providers key on the unpadded number: "UA0123" and "UA123" are one flight.
-    return f"{airline}{int(number)}{suffix}"
+    return f"{airline}{number}{suffix}"
 
 
 def airline_from_flight_number(flight_no: str) -> str | None:
-    m = _FLIGHT_NO_RE.match(flight_no.upper())
-    return m.group(1) if m else None
+    parts = split_flight_number(flight_no)
+    return parts[0] if parts else None
 
 
 def parse_local_time(raw: str | None) -> datetime | None:
