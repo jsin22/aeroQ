@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # --- Cache -------------------------------------------------------------
     cache_ttl_hours: float = 4.0
     departure_block_hours: int = 12
+    # Beyond this, no provider has a departure board to return, so spending a
+    # call to discover that is pure waste. Requests past the horizon go
+    # straight to the historical baseline.
+    board_horizon_days: int = 7
 
     # --- Prediction --------------------------------------------------------
     seats_per_flight: int = 150

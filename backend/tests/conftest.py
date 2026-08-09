@@ -8,10 +8,28 @@ aeroq.db.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app import db
+from app import cache, db
 from app.config import get_settings, settings
+
+
+@pytest.fixture(autouse=True)
+def reset_airport_locks():
+    """Drop the per-airport lock registry between tests.
+
+    Production runs one event loop for the process lifetime, so the registry is
+    correct there. pytest-asyncio creates a fresh loop per test, and an
+    asyncio.Lock reused across loops raises once contended — a flake that would
+    only ever appear in the concurrency tests, which are the ones worth
+    trusting.
+    """
+    cache._locks.clear()
+    cache._locks_guard = asyncio.Lock()
+    yield
+    cache._locks.clear()
 
 
 @pytest.fixture
