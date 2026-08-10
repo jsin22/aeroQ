@@ -41,8 +41,12 @@ class Assumptions(BaseModel):
     origin_passenger_factor: float
     lanes_per_terminal: int
     passengers_per_lane_per_hour: int
-    rush_window_hours: float
+    security_window_hours: float
     gate_buffer_minutes: int
+    # Lanes actually used for this prediction, and how we arrived at the
+    # number. Estimated from the airport's peak hour unless configured.
+    lanes: int | None = None
+    lanes_source: str | None = None
 
 
 class RushWindow(BaseModel):

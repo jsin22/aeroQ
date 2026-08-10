@@ -28,7 +28,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from . import history
-from .cache import BoardResult, count_terminals
+from .cache import (
+    BoardResult,
+    count_terminals,
+    peak_hourly_departures,
+    required_span,
+)
 from .config import settings
 from .normalize import NormalizedFlight
 
@@ -83,12 +88,91 @@ class Prediction:
 
 # --- The arithmetic ---------------------------------------------------------
 
-def capacity_for(scope: str, n_terminals: int) -> int:
-    """Checkpoint throughput per hour for the scope being measured.
+def co_queue_weight(flight_departure: datetime, your_departure: datetime) -> float:
+    """How much a given flight's passengers share the queue with you.
 
-    The whole-airport branch is the v1 bug fix: widening demand to the airport
-    without widening capacity made every fallback report Severe.
+    Counting only flights that depart *before* yours measures the wrong crowd:
+    those passengers are largely through security already. What matters is
+    whose security window overlaps yours, and passengers for a flight leaving
+    at D are at security roughly [D - lead_max, D - lead_min].
+
+    Two such windows overlap by `W - |D1 - D2|`, so the share collapses to a
+    triangular weight: a flight leaving alongside yours counts fully, one
+    leaving W either side counts nothing, and — the point — a flight leaving
+    *after* yours counts just as much as one leaving the same interval before.
     """
+    window = settings.security_window_hours
+    if window <= 0:
+        return 0.0
+    delta_hours = abs((flight_departure - your_departure).total_seconds()) / 3600.0
+    return max(0.0, 1.0 - delta_hours / window)
+
+
+def security_window(departure: datetime) -> tuple[datetime, datetime]:
+    """When you are physically at security."""
+    return (
+        departure - timedelta(minutes=settings.security_lead_max_minutes),
+        departure - timedelta(minutes=settings.security_lead_min_minutes),
+    )
+
+
+def counted_window(departure: datetime) -> tuple[datetime, datetime]:
+    """The span of departures whose passengers can share your queue.
+
+    Delegates to cache.required_span so the cache's coverage check and this
+    one cannot drift apart — when they did, a board passed the cache check and
+    was then rejected here, surfacing as a spurious "no schedule available".
+    """
+    return required_span(departure)
+
+
+def estimate_lanes(
+    iata: str, scope: str, terminal_norm: str | None, n_terminals: int
+) -> tuple[int, str]:
+    """Infer how many security lanes serve this scope.
+
+    Lane counts are not published in any usable form — TSA does not release
+    them, airport sites are inconsistent, and non-US airports have nothing
+    comparable. The best available proxy is the airport's own busiest hour:
+    whatever it was built to handle, it was built to handle that.
+
+    Sizing on the *peak* while measuring demand hour by hour is what keeps the
+    output meaningful. Sizing on current demand instead would make the ratio
+    roughly constant everywhere, and every airport would read the same at every
+    hour.
+    """
+    if not settings.estimate_lanes:
+        fallback = settings.lanes_per_terminal * (
+            1 if scope == TERMINAL else max(n_terminals, 1)
+        )
+        return fallback, "configured"
+
+    scope_terminal = terminal_norm if scope == TERMINAL else None
+
+    # The corpus knows the true daily peak; the board only covers 12 hours and
+    # can miss it, which would undersize the checkpoint and overstate the wait.
+    peak = history.peak_hourly_departures(iata, scope_terminal)
+    source = "estimated from history"
+    if peak is None:
+        peak = float(peak_hourly_departures(iata, scope_terminal))
+        source = "estimated from today's schedule"
+
+    if peak <= 0:
+        fallback = settings.lanes_per_terminal * (
+            1 if scope == TERMINAL else max(n_terminals, 1)
+        )
+        return fallback, "default (no schedule seen)"
+
+    peak_passengers = peak * settings.seats_per_flight * settings.origin_pax_factor
+    lanes = round(
+        peak_passengers / settings.pax_per_lane_per_hour * settings.lane_design_factor
+    )
+    lanes = max(settings.min_estimated_lanes, min(settings.max_estimated_lanes, lanes))
+    return int(lanes), source
+
+
+def capacity_for(scope: str, n_terminals: int) -> int:
+    """Fixed-lane capacity. Retained for the configured (non-estimating) path."""
     base = settings.terminal_capacity_per_hour
     if scope == TERMINAL:
         return base
@@ -114,11 +198,11 @@ def estimate_wait_minutes(passengers: int, capacity_per_hour: int) -> int:
     exceeds throughput and a backlog forms, so the excess is divided by the
     service rate and added — which is why the curve steepens past ratio 1.
     """
-    window_capacity = capacity_per_hour * settings.rush_window_hours
+    window_capacity = capacity_per_hour * settings.security_window_hours
     if window_capacity <= 0:
         return int(settings.max_wait_min)
 
-    ratio = (passengers / settings.rush_window_hours) / capacity_per_hour
+    ratio = (passengers / settings.security_window_hours) / capacity_per_hour
 
     if ratio <= 1.0:
         wait = settings.base_wait_min + (
@@ -131,16 +215,27 @@ def estimate_wait_minutes(passengers: int, capacity_per_hour: int) -> int:
     return int(round(min(wait, settings.max_wait_min)))
 
 
-def _filter_window(
-    flights: list[NormalizedFlight],
-    start: datetime,
-    end: datetime,
-    terminal_norm: str | None,
+def _in_scope(
+    flights: list[NormalizedFlight], terminal_norm: str | None
 ) -> list[NormalizedFlight]:
-    out = [f for f in flights if start <= f.dep_time_local < end]
-    if terminal_norm is not None:
-        out = [f for f in out if f.dep_terminal_norm == terminal_norm]
-    return out
+    if terminal_norm is None:
+        return flights
+    return [f for f in flights if f.dep_terminal_norm == terminal_norm]
+
+
+def _effective_flights(
+    flights: list[NormalizedFlight], departure: datetime, terminal_norm: str | None
+) -> float:
+    """Flights weighted by how much their crowd overlaps yours.
+
+    A fractional result is correct rather than sloppy: a flight leaving 60
+    minutes after yours genuinely contributes about half its passengers to the
+    queue you stand in.
+    """
+    return sum(
+        co_queue_weight(f.dep_time_local, departure)
+        for f in _in_scope(flights, terminal_norm)
+    )
 
 
 def _assumptions() -> dict:
@@ -149,7 +244,7 @@ def _assumptions() -> dict:
         "origin_passenger_factor": settings.origin_pax_factor,
         "lanes_per_terminal": settings.lanes_per_terminal,
         "passengers_per_lane_per_hour": settings.pax_per_lane_per_hour,
-        "rush_window_hours": settings.rush_window_hours,
+        "security_window_hours": settings.security_window_hours,
         "gate_buffer_minutes": settings.gate_buffer_min,
     }
 
@@ -168,11 +263,16 @@ def _build(
     flight_count: float,
     n_terminals: int,
     terminal_matched: bool,
+    airport_code: str | None = None,
+    terminal_norm: str | None = None,
     note: str | None = None,
 ) -> Prediction:
     passengers = estimate_passengers(flight_count)
-    capacity = capacity_for(scope, n_terminals)
-    demand_per_hour = passengers / settings.rush_window_hours
+    lanes, lanes_source = estimate_lanes(
+        airport_code or airport, scope, terminal_norm, n_terminals
+    )
+    capacity = lanes * settings.pax_per_lane_per_hour
+    demand_per_hour = passengers / settings.security_window_hours
     ratio = demand_per_hour / capacity if capacity else 0.0
     wait = estimate_wait_minutes(passengers, capacity)
 
@@ -195,7 +295,7 @@ def _build(
         recommended_arrival_local=departure
         - timedelta(minutes=wait + settings.gate_buffer_min),
         terminal_matched=terminal_matched,
-        assumptions=_assumptions(),
+        assumptions={**_assumptions(), "lanes": lanes, "lanes_source": lanes_source},
         note=note,
     )
 
@@ -221,28 +321,34 @@ def predict(
     5. neither                      -> PredictionUnavailable
     """
     airport = board.iata.upper()
-    window_start = departure - timedelta(hours=settings.rush_window_hours)
+    # Report the window the user is actually at security; count the wider span
+    # of departures whose crowds overlap it.
+    window_start, window_end = security_window(departure)
+    counted_start, counted_end = counted_window(departure)
     n_terminals = count_terminals(airport)
 
-    board_covers = board.flights and board.covers(window_start, departure)
+    # Coverage is judged against the counted span, since flights after the
+    # departure now contribute too.
+    board_covers = board.flights and board.covers(counted_start, counted_end)
 
     # --- Levels 1-3: a live board exists ---
     if board_covers:
         if terminal_norm is not None:
-            matched = _filter_window(board.flights, window_start, departure, terminal_norm)
-            if matched:
+            weighted = _effective_flights(board.flights, departure, terminal_norm)
+            if weighted > 0:
                 return _build(
                     airport=airport, terminal=terminal_norm, scope=TERMINAL,
                     confidence=HIGH, reason="Terminal reported by the schedule",
-                    basis=LIVE, window_start=window_start, window_end=departure,
-                    departure=departure, flight_count=len(matched),
+                    basis=LIVE, window_start=window_start, window_end=window_end,
+                    departure=departure, flight_count=weighted,
                     n_terminals=n_terminals, terminal_matched=True,
+                    airport_code=airport, terminal_norm=terminal_norm,
                     note=board.note,
                 )
             # Terminal given but nothing matched it — the board disagrees with
             # the resolution, so widening is more honest than reporting zero.
             return _airport_scope(
-                board, departure, window_start, n_terminals, airport,
+                board, departure, window_start, window_end, n_terminals, airport,
                 reason=(
                     f"No departures found for Terminal {terminal_norm}; "
                     "estimating for the whole airport"
@@ -252,22 +358,21 @@ def predict(
 
         guess = history.modal_terminal(flight_iata)
         if guess:
-            matched = _filter_window(
-                board.flights, window_start, departure, guess.terminal
-            )
-            if matched:
+            weighted = _effective_flights(board.flights, departure, guess.terminal)
+            if weighted > 0:
                 return _build(
                     airport=airport, terminal=guess.terminal, scope=TERMINAL,
                     confidence=MEDIUM,
                     reason=f"Terminal not published yet; {flight_iata} {guess.confidence_text}",
-                    basis=LIVE, window_start=window_start, window_end=departure,
-                    departure=departure, flight_count=len(matched),
+                    basis=LIVE, window_start=window_start, window_end=window_end,
+                    departure=departure, flight_count=weighted,
                     n_terminals=n_terminals, terminal_matched=False,
+                    airport_code=airport, terminal_norm=guess.terminal,
                     note=board.note,
                 )
 
         return _airport_scope(
-            board, departure, window_start, n_terminals, airport,
+            board, departure, window_start, window_end, n_terminals, airport,
             reason="Terminal not published yet; estimating for the whole airport",
             note=board.note,
         )
@@ -279,10 +384,10 @@ def predict(
         baseline_terminal = guess.terminal if guess else None
 
     estimate = history.baseline_for_window(
-        airport, baseline_terminal, window_start, departure
+        airport, baseline_terminal, window_start, window_end
     )
     if estimate is None and baseline_terminal is not None:
-        estimate = history.baseline_for_window(airport, None, window_start, departure)
+        estimate = history.baseline_for_window(airport, None, window_start, window_end)
         baseline_terminal = None
 
     if estimate is not None:
@@ -294,9 +399,10 @@ def predict(
                 f"No live schedule for this date; {estimate.description}, "
                 "not today's actual flights"
             ),
-            basis=BASELINE, window_start=window_start, window_end=departure,
+            basis=BASELINE, window_start=window_start, window_end=window_end,
             departure=departure, flight_count=estimate.flights,
             n_terminals=n_terminals, terminal_matched=bool(baseline_terminal),
+            airport_code=airport, terminal_norm=baseline_terminal,
             note=board.note,
         )
 
@@ -315,16 +421,18 @@ def _airport_scope(
     board: BoardResult,
     departure: datetime,
     window_start: datetime,
+    window_end: datetime,
     n_terminals: int,
     airport: str,
     *,
     reason: str,
     note: str | None,
 ) -> Prediction:
-    everything = _filter_window(board.flights, window_start, departure, None)
+    weighted = _effective_flights(board.flights, departure, None)
     return _build(
         airport=airport, terminal=None, scope=AIRPORT, confidence=LOW,
         reason=reason, basis=LIVE, window_start=window_start,
-        window_end=departure, departure=departure, flight_count=len(everything),
-        n_terminals=n_terminals, terminal_matched=False, note=note,
+        window_end=window_end, departure=departure, flight_count=weighted,
+        n_terminals=n_terminals, terminal_matched=False,
+        airport_code=airport, note=note,
     )

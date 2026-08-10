@@ -61,7 +61,10 @@ def frozen_settings(monkeypatch):
     """Pin the prediction tunables so tests assert against known arithmetic."""
     monkeypatch.setattr(settings, "seats_per_flight", 150)
     monkeypatch.setattr(settings, "origin_pax_factor", 0.75)
-    monkeypatch.setattr(settings, "rush_window_hours", 2.0)
+    monkeypatch.setattr(settings, "security_lead_min_minutes", 45)
+    monkeypatch.setattr(settings, "security_lead_max_minutes", 165)
+    # Fixed lanes for the pure-arithmetic tests; estimation has its own tests.
+    monkeypatch.setattr(settings, "estimate_lanes", False)
     monkeypatch.setattr(settings, "lanes_per_terminal", 5)
     monkeypatch.setattr(settings, "pax_per_lane_per_hour", 150)
     monkeypatch.setattr(settings, "light_max_ratio", 0.6)

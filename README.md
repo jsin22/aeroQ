@@ -1,12 +1,13 @@
 # aeroQ
 
 Estimates how busy airport security will be when you get there, from how many
-flights depart just before yours.
+flights depart around the same time as yours.
 
-You type a flight number. It works out the airport and terminal, counts the
-departures in the two hours before yours, converts that to a passenger load,
-compares it against checkpoint capacity, and tells you **what time to be at
-security**.
+You type a flight number. It works out the airport and terminal, weighs up the
+departures whose passengers share your queue — including flights leaving
+*after* yours, since those people arrive early — converts that to a passenger
+load, compares it against estimated checkpoint capacity, and tells you **what
+time to be at security**.
 
 It runs on a single small machine and shares one public URL with friends.
 
@@ -17,7 +18,8 @@ It runs on a single small machine and shares one public URL with friends.
 This is a **heuristic, not a measurement**. There is no live queue sensor
 anywhere in it. It infers pressure from schedule density and a set of stated
 assumptions — 150 seats per flight, 75% of passengers originating rather than
-connecting, 5 lanes per terminal at 150 passengers/hour each.
+connecting, and a lane count inferred from the airport's busiest hour at 150
+passengers/hour each.
 
 Every response carries those assumptions and a `confidence` level, and the UI
 shows the arithmetic. That is deliberate: an estimate presented without its
@@ -58,7 +60,7 @@ built, so no live quota was consumed.
 ```bash
 cd backend && .venv/bin/python -m uvicorn app.main:app --reload --port 8000
 cd frontend && npm run dev     # :5173, proxies /api to :8000
-cd backend && .venv/bin/python -m pytest      # 201 tests
+cd backend && .venv/bin/python -m pytest      # 227 tests
 ```
 
 ---
@@ -266,13 +268,38 @@ causes are `SEATS_PER_FLIGHT=150` applied uniformly to regional aircraft, and
 |---|---|---|
 | `SEATS_PER_FLIGHT` | 150 | Biggest single lever on the estimate |
 | `ORIGIN_PAX_FACTOR` | 0.75 | Share not connecting |
-| `LANES_PER_TERMINAL` | 5 | With the next value, sets capacity |
-| `PAX_PER_LANE_PER_HOUR` | 150 | 5 × 150 = 750/hour per terminal |
+| `SECURITY_LEAD_MAX_MINUTES` | 165 | Passengers arrive at security by here |
+| `SECURITY_LEAD_MIN_MINUTES` | 45 | And are through by here |
+| `LANE_DESIGN_FACTOR` | 0.85 | <1 so a true peak reads Severe |
+| `PAX_PER_LANE_PER_HOUR` | 150 | Throughput of one lane |
+| `ESTIMATE_LANES` | true | False falls back to `LANES_PER_TERMINAL` |
 | `LIGHT_MAX_RATIO` | 0.6 | Below this, "Light" |
 | `MODERATE_MAX_RATIO` | 1.0 | Above this, "Severe" |
 | `GATE_BUFFER_MIN` | 45 | Added to the recommended arrival |
 | `CACHE_TTL_HOURS` | 4 | Higher = fewer calls, staler boards |
 | `BOARD_HORIZON_DAYS` | 7 | Past this, no call is made at all |
+
+### Which flights count
+
+The gap between the two `SECURITY_LEAD_*` values is the co-queuing span. A
+flight leaving alongside yours counts fully; one leaving that span either side
+counts nothing; one halfway counts half. Widening the gap pulls in more
+flights and raises every estimate.
+
+### Where lane counts come from
+
+Nobody publishes them — TSA does not release lane counts, airport sites are
+inconsistent, and non-US airports have nothing comparable. They are inferred
+from the airport's busiest observed hour, on the reasoning that whatever it
+was built to handle, it was built to handle that.
+
+Sizing on the **peak** while measuring demand **hour by hour** is what keeps
+the output meaningful. Sizing on current demand would make the ratio roughly
+constant and every airport would read the same at every hour.
+
+Observed: JFK Terminal 4 estimates to 16 lanes (the real terminal has around
+20); Port of Spain to 3. The estimate improves as the corpus fills in, since a
+12-hour board can miss the true daily peak.
 
 ---
 

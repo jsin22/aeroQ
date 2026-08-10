@@ -58,9 +58,26 @@ class Settings(BaseSettings):
     # --- Prediction --------------------------------------------------------
     seats_per_flight: int = 150
     origin_pax_factor: float = 0.75
-    rush_window_hours: float = 2.0
-    lanes_per_terminal: int = 5
+
+    # When passengers are physically at security, relative to their departure.
+    # Their crowd overlaps ours in proportion to how close the two departures
+    # are, which is what makes flights leaving *after* yours count.
+    security_lead_min_minutes: int = 45     # cleared by this point
+    security_lead_max_minutes: int = 165    # arrived by this point
+
+    rush_window_hours: float = 2.0          # retained; derived value below wins
+    lanes_per_terminal: int = 5             # fallback when estimation is off
     pax_per_lane_per_hour: int = 150
+
+    # Lane counts are not published anywhere usable, so they are inferred from
+    # the airport's busiest observed hour - a proxy for what it was built to
+    # handle. Sizing on the peak while measuring demand hour by hour is what
+    # keeps the ratio meaningful; sizing on current demand would make every
+    # airport read the same.
+    estimate_lanes: bool = True
+    lane_design_factor: float = 0.85        # <1 so a true peak can read Severe
+    min_estimated_lanes: int = 2
+    max_estimated_lanes: int = 80
     light_max_ratio: float = 0.6
     moderate_max_ratio: float = 1.0
     base_wait_min: float = 5.0
@@ -103,6 +120,17 @@ class Settings(BaseSettings):
     def terminal_capacity_per_hour(self) -> int:
         """Throughput of a single terminal's security checkpoint."""
         return self.lanes_per_terminal * self.pax_per_lane_per_hour
+
+    @property
+    def security_window_hours(self) -> float:
+        """How long a passenger is at security, and the co-queuing half-width.
+
+        Two flights' security crowds stop overlapping once their departures
+        are further apart than this.
+        """
+        return (
+            self.security_lead_max_minutes - self.security_lead_min_minutes
+        ) / 60.0
 
 
 @lru_cache

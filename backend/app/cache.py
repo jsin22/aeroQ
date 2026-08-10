@@ -89,6 +89,18 @@ def plan_window(departure: datetime) -> tuple[datetime, datetime]:
     return start, start + block
 
 
+def required_span(departure: datetime) -> tuple[datetime, datetime]:
+    """The departures a prediction needs in order to answer.
+
+    Must match predict.py's counted span exactly. When these disagreed, a board
+    could pass the cache's coverage check and then be rejected by the
+    prediction, producing a spurious "no schedule available" instead of a
+    refetch.
+    """
+    span = timedelta(hours=settings.security_window_hours)
+    return departure - span, departure + span
+
+
 def beyond_horizon(departure: datetime, now: datetime | None = None) -> bool:
     now = now or datetime.now()
     return departure - now > timedelta(days=settings.board_horizon_days)
@@ -221,10 +233,10 @@ async def get_board(
 ) -> BoardResult:
     now = now or datetime.now()
     iata = iata.upper()
-    rush_start = departure - timedelta(hours=settings.rush_window_hours)
+    needed_start, needed_end = required_span(departure)
 
     existing = load_board(iata)
-    if existing.data_source == CACHE and existing.covers(rush_start, departure):
+    if existing.data_source == CACHE and existing.covers(needed_start, needed_end):
         return existing  # free: no lock, no ledger, no call
 
     if beyond_horizon(departure, now):
@@ -241,7 +253,7 @@ async def get_board(
         # Re-check: a concurrent request may have just fetched this board.
         # Without this, every waiter refetches what the first one stored.
         existing = load_board(iata)
-        if existing.data_source == CACHE and existing.covers(rush_start, departure):
+        if existing.data_source == CACHE and existing.covers(needed_start, needed_end):
             return existing
 
         window_start, window_end = plan_window(departure)
@@ -290,6 +302,31 @@ def _degrade(existing: BoardResult, iata: str, reason: str) -> BoardResult:
 
     log.warning("no board available for %s: %s", iata, reason)
     return BoardResult(iata=iata, flights=[], data_source=NONE, note=reason)
+
+
+def peak_hourly_departures(iata: str, terminal_norm: str | None = None) -> int:
+    """Busiest single hour in the cached board.
+
+    Used to size checkpoint capacity: an airport's peak hour is a usable proxy
+    for what it was built to handle, in the absence of any published lane data.
+    """
+    sql = """
+        SELECT COUNT(*) AS c FROM flights
+        WHERE iata = ?
+        {terminal_filter}
+        GROUP BY substr(dep_time_local, 1, 13)
+        ORDER BY c DESC LIMIT 1
+    """
+    params: list = [iata.upper()]
+    if terminal_norm is None:
+        sql = sql.format(terminal_filter="")
+    else:
+        sql = sql.format(terminal_filter="AND dep_terminal_norm = ?")
+        params.append(terminal_norm)
+
+    with db.connect() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return int(row["c"]) if row else 0
 
 
 def count_terminals(iata: str) -> int:

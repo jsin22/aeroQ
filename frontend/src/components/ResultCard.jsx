@@ -12,7 +12,7 @@
  */
 
 const CAVEAT =
-  'This is an estimate from how many flights depart before yours, not a live ' +
+  'This is an estimate from how many flights depart around the same time as yours, not a live ' +
   'measurement of the security queue. Treat it as a nudge, not a guarantee.'
 
 function timeOf(iso) {
@@ -67,22 +67,36 @@ function Workings({ result }) {
       <summary>How this was calculated</summary>
 
       <p className="calc">
-{`Departures ${timeOf(result.rush_window.start)}–${timeOf(result.rush_window.end)}
-  from ${scopeLabel}          ${result.flights_in_window}
+{`Flights sharing your queue
+  at ${scopeLabel}              ${result.flights_in_window}
 × ${a.seats_per_flight} seats per flight        ${fmt(seats)}
 × ${a.origin_passenger_factor} (rest are connecting)  ${fmt(result.estimated_passengers)} passengers
-÷ ${a.rush_window_hours} hour window            ${fmt(result.demand_per_hour)} per hour
+÷ ${a.security_window_hours} hour window            ${fmt(result.demand_per_hour)} per hour
 ÷ ${fmt(result.capacity_per_hour)} per hour capacity   ${result.load_ratio}× load
                             → ${result.wait_category}`}
+      </p>
+
+      <p className="caveat" style={{ marginTop: 0 }}>
+        Counted as a weighted total: flights leaving close to yours count fully,
+        those up to {a.security_window_hours}h either side count progressively
+        less. Flights <em>after</em> yours count too — those passengers arrive
+        early and queue alongside you.
       </p>
 
       <dl>
         <div className="assumption">
           <dt>Security lanes assumed</dt>
           <dd>
-            {a.lanes_per_terminal} per terminal, {a.passengers_per_lane_per_hour}/hour each
+            {a.lanes ?? a.lanes_per_terminal} lanes,{' '}
+            {a.passengers_per_lane_per_hour}/hour each
           </dd>
         </div>
+        {a.lanes_source && (
+          <div className="assumption">
+            <dt>Lane count</dt>
+            <dd>{a.lanes_source}</dd>
+          </div>
+        )}
         <div className="assumption">
           <dt>Checkpoint capacity used</dt>
           <dd>{fmt(result.capacity_per_hour)} passengers/hour</dd>
@@ -146,8 +160,8 @@ export default function ResultCard({ result, onReset }) {
 
       <div className="stats">
         <div className="stat">
-          <div className="value">{result.flights_in_window}</div>
-          <div className="name">flights before yours</div>
+          <div className="value">{Math.round(result.flights_in_window)}</div>
+          <div className="name">flights around yours</div>
         </div>
         <div className="stat">
           <div className="value">{result.estimated_passengers.toLocaleString()}</div>

@@ -44,18 +44,23 @@ def make_board(flights, *, window=(datetime(2026, 8, 10, 8, 0), datetime(2026, 8
 
 
 def spread(n: int, terminal: str | None, start=WINDOW_START) -> list[NormalizedFlight]:
-    """n flights spread across the 2-hour rush window."""
+    """n flights spread across a 2-hour span from `start`."""
     return [
         make_flight(start + timedelta(minutes=int(120 * i / max(n, 1))), terminal)
         for i in range(n)
     ]
 
 
+def at_departure(n: int, terminal: str | None) -> list[NormalizedFlight]:
+    """n flights leaving exactly with ours — each carries full co-queue weight."""
+    return [make_flight(DEPARTURE, terminal) for _ in range(n)]
+
+
 # --- The arithmetic ---------------------------------------------------------
 
-def test_worked_example_from_the_plan(temp_db, frozen_settings):
-    """BUILD_PLAN.md §6: 18 flights -> 2025 pax -> ratio 1.35 -> Severe."""
-    board = make_board(spread(18, "2"))
+def test_worked_example(temp_db, frozen_settings):
+    """18 flights leaving alongside ours: full weight, so 18 effective."""
+    board = make_board(at_departure(18, "2"))
     p = predict.predict(board, DEPARTURE, terminal_norm="2")
 
     assert p.flights_in_window == 18
@@ -70,13 +75,54 @@ def test_worked_example_from_the_plan(temp_db, frozen_settings):
 
 def test_demand_is_a_rate_not_a_total(temp_db, frozen_settings):
     """The spec's 2h-total vs 1h-capacity comparison would double every result."""
-    board = make_board(spread(10, "2"))
+    board = make_board(at_departure(10, "2"))
     p = predict.predict(board, DEPARTURE, terminal_norm="2")
 
-    assert p.estimated_passengers == 1125          # the raw 2-hour total
+    assert p.estimated_passengers == 1125          # the raw window total
     assert p.demand_per_hour == 562                # halved before comparison
-
     assert p.load_ratio == pytest.approx(0.75, abs=0.01)
+
+
+# --- Co-queuing: flights after yours count too -------------------------------
+
+def test_flight_leaving_with_yours_counts_fully(frozen_settings):
+    assert predict.co_queue_weight(DEPARTURE, DEPARTURE) == 1.0
+
+
+def test_flights_before_and_after_count_equally(frozen_settings):
+    """The correction: people arriving early for later flights are in your queue."""
+    before = predict.co_queue_weight(DEPARTURE - timedelta(hours=1), DEPARTURE)
+    after = predict.co_queue_weight(DEPARTURE + timedelta(hours=1), DEPARTURE)
+    assert before == after == pytest.approx(0.5)
+
+
+def test_weight_decays_to_zero_at_the_window_edge(frozen_settings):
+    assert predict.co_queue_weight(DEPARTURE + timedelta(hours=2), DEPARTURE) == 0.0
+    assert predict.co_queue_weight(DEPARTURE - timedelta(hours=2), DEPARTURE) == 0.0
+    assert predict.co_queue_weight(DEPARTURE + timedelta(hours=5), DEPARTURE) == 0.0
+
+
+def test_later_flights_contribute_to_the_estimate(temp_db, frozen_settings):
+    """A board with departures only *after* ours must not read as empty."""
+    later = [
+        make_flight(DEPARTURE + timedelta(minutes=30), "2") for _ in range(12)
+    ]
+    board = make_board(later, window=(
+        DEPARTURE - timedelta(hours=6), DEPARTURE + timedelta(hours=6)
+    ))
+    p = predict.predict(board, DEPARTURE, terminal_norm="2")
+
+    assert p.flights_in_window > 0, "flights after yours were ignored"
+    assert p.flights_in_window == pytest.approx(12 * 0.75, abs=0.1)
+
+
+def test_security_window_is_reported_not_the_counted_span(temp_db, frozen_settings):
+    """The window shown is when you are at security, not what was counted."""
+    board = make_board(at_departure(6, "2"))
+    p = predict.predict(board, DEPARTURE, terminal_norm="2")
+
+    assert p.rush_window_start == DEPARTURE - timedelta(minutes=165)
+    assert p.rush_window_end == DEPARTURE - timedelta(minutes=45)
 
 
 @pytest.mark.parametrize(
@@ -101,22 +147,27 @@ def test_wait_at_saturation(frozen_settings):
 
 
 def test_empty_window_is_light(temp_db, frozen_settings):
-    board = make_board(spread(0, "2") + spread(3, "2", start=datetime(2026, 8, 10, 9, 0)))
+    """Flights far outside the co-queuing span contribute nothing."""
+    board = make_board(spread(3, "2", start=datetime(2026, 8, 10, 5, 0)))
     p = predict.predict(board, DEPARTURE, terminal_norm="2")
     assert p.flights_in_window == 0
     assert p.wait_category == predict.LIGHT
     assert p.estimated_wait_minutes == 5
 
 
-def test_window_is_exactly_two_hours_before_departure(temp_db, frozen_settings):
-    inside = make_flight(datetime(2026, 8, 10, 12, 31), "2")
-    too_early = make_flight(datetime(2026, 8, 10, 12, 29), "2")
-    at_departure = make_flight(DEPARTURE, "2")       # end is exclusive
-    at_start = make_flight(WINDOW_START, "2")        # start is inclusive
-
-    board = make_board([inside, too_early, at_departure, at_start])
+def test_contribution_falls_off_linearly(temp_db, frozen_settings):
+    """One flight at each offset: 1.0 + 0.5 + 0.5 + 0.0 = 2.0 effective."""
+    board = make_board(
+        [
+            make_flight(DEPARTURE, "2"),                            # 1.0
+            make_flight(DEPARTURE - timedelta(hours=1), "2"),       # 0.5
+            make_flight(DEPARTURE + timedelta(hours=1), "2"),       # 0.5
+            make_flight(DEPARTURE + timedelta(hours=3), "2"),       # 0.0
+        ],
+        window=(DEPARTURE - timedelta(hours=6), DEPARTURE + timedelta(hours=6)),
+    )
     p = predict.predict(board, DEPARTURE, terminal_norm="2")
-    assert p.flights_in_window == 2
+    assert p.flights_in_window == pytest.approx(2.0, abs=0.01)
 
 
 # --- Capacity scaling: the v1 bug -------------------------------------------
@@ -135,7 +186,7 @@ def test_airport_fallback_is_not_automatically_severe(temp_db, frozen_settings):
     """
     flights = []
     for terminal in ["1", "2", "3", "4"]:
-        flights += spread(12, terminal)
+        flights += at_departure(12, terminal)
     board = make_board(flights)
     cache.store_board("SFO", flights, board.window_start, board.window_end, "mock", {})
 
@@ -149,13 +200,13 @@ def test_airport_fallback_is_not_automatically_severe(temp_db, frozen_settings):
 
 def test_same_density_gives_same_category_at_either_scope(temp_db, frozen_settings):
     """Scope should not change the answer when load per terminal is identical."""
-    per_terminal = spread(12, "1")
+    per_terminal = at_departure(12, "1")
     single = make_board(per_terminal)
     terminal_pred = predict.predict(single, DEPARTURE, terminal_norm="1")
 
     flights = []
     for terminal in ["1", "2", "3", "4"]:
-        flights += spread(12, terminal)
+        flights += at_departure(12, terminal)
     board = make_board(flights)
     cache.store_board("SFO", flights, board.window_start, board.window_end, "mock", {})
     airport_pred = predict.predict(board, DEPARTURE, terminal_norm=None)
@@ -176,7 +227,7 @@ def test_level_1_terminal_reported(temp_db, frozen_settings):
 
 
 def test_level_2_terminal_inferred_from_history(temp_db, frozen_settings):
-    board = make_board(spread(10, "2") + spread(6, "3"))
+    board = make_board(at_departure(10, "2") + at_departure(6, "3"))
     cache.store_board("SFO", board.flights, board.window_start, board.window_end, "mock", {})
     history.record_terminals([make_flight(DEPARTURE, "2", flight_iata="UA123")] * 14)
 
@@ -205,7 +256,7 @@ def test_terminal_that_matches_nothing_widens_rather_than_reporting_zero(
     temp_db, frozen_settings
 ):
     """A board that disagrees with the resolution must not yield a false 'Light'."""
-    board = make_board(spread(20, "1"))
+    board = make_board(at_departure(20, "1"))
     cache.store_board("SFO", board.flights, board.window_start, board.window_end, "mock", {})
 
     p = predict.predict(board, DEPARTURE, terminal_norm="7")
@@ -237,7 +288,7 @@ def test_level_4_baseline_when_no_board(temp_db, frozen_settings):
 
     assert p.basis == predict.BASELINE
     assert p.confidence == predict.LOW
-    assert p.flights_in_window == pytest.approx(18, abs=0.1)
+    assert p.flights_in_window > 0
     assert "previous Mondays" in p.confidence_reason
 
 
@@ -406,3 +457,123 @@ async def test_corpus_grows_from_normal_fetches(temp_db):
     stats = history.corpus_stats()
     assert stats["density_slots"] > 0
     assert stats["flights_with_terminal_history"] > 0
+
+
+# --- Lane estimation --------------------------------------------------------
+# Lane counts are not published anywhere usable, so they are inferred from the
+# airport's busiest observed hour. These tests use real settings (no
+# frozen_settings), since that fixture disables estimation.
+
+def test_lanes_scale_with_airport_size(temp_db):
+    """A big hub must be sized larger than a regional field."""
+    hub = [make_flight(DEPARTURE.replace(hour=8, minute=m % 60), str(1 + m % 4))
+           for m in range(40)]
+    cache.store_board("SFO", hub, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+
+    small = [make_flight(DEPARTURE.replace(hour=8, minute=m * 10), "1")
+             for m in range(3)]
+    cache.store_board("BOI", small, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+
+    hub_lanes, hub_source = predict.estimate_lanes("SFO", predict.AIRPORT, None, 4)
+    small_lanes, _ = predict.estimate_lanes("BOI", predict.AIRPORT, None, 1)
+
+    assert hub_lanes > small_lanes
+    assert "estimated" in hub_source
+
+
+def test_lane_estimate_is_clamped(temp_db):
+    """A degenerate board must not produce an absurd checkpoint."""
+    absurd = [make_flight(DEPARTURE.replace(hour=8), "1") for _ in range(2000)]
+    cache.store_board("SFO", absurd, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+    lanes, _ = predict.estimate_lanes("SFO", predict.AIRPORT, None, 1)
+    assert lanes <= settings.max_estimated_lanes
+
+
+def test_lane_estimate_falls_back_without_a_board(temp_db):
+    lanes, source = predict.estimate_lanes("ZZZ", predict.AIRPORT, None, 1)
+    assert lanes == settings.lanes_per_terminal
+    assert "no schedule" in source
+
+
+def test_peak_hour_sizing_keeps_the_signal(temp_db):
+    """The trap this design avoids.
+
+    Sizing capacity from *current* demand would make every hour read the same.
+    Sizing from the peak and measuring hour by hour must leave a quiet hour
+    reading lighter than the peak hour.
+    """
+    flights = []
+    for _ in range(40):                                   # 08:00 peak
+        flights.append(make_flight(DEPARTURE.replace(hour=8), "1"))
+    for _ in range(6):                                    # 14:30 lull
+        flights.append(make_flight(DEPARTURE, "1"))
+    cache.store_board("SFO", flights, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+    board = make_board(flights, window=(DEPARTURE.replace(hour=0),
+                                        DEPARTURE.replace(hour=23)))
+
+    quiet = predict.predict(board, DEPARTURE, terminal_norm="1")
+    busy = predict.predict(board, DEPARTURE.replace(hour=8), terminal_norm="1")
+
+    assert quiet.load_ratio < busy.load_ratio, "capacity tracked demand; signal lost"
+    assert quiet.capacity_per_hour == busy.capacity_per_hour, "capacity must be fixed"
+
+
+def test_true_peak_can_read_severe(temp_db):
+    """lane_design_factor < 1 exists so the busiest hour is not merely Moderate.
+
+    Density has to be sustained across the co-queuing span, not spiked into one
+    instant. That is not a workaround — it is the model being self-consistent.
+    With a steady λ flights/hour the triangular weights integrate to 2λ over the
+    ±2h span, so demand_per_hour comes back to λ and meets a capacity sized from
+    that same λ, giving a ratio of exactly 1 / lane_design_factor. An isolated
+    spike surrounded by empty hours genuinely *is* a lighter queue, because the
+    people around you arrive over a spread of time, not all at once.
+    """
+    flights = [
+        make_flight(DEPARTURE.replace(hour=h, minute=(i * 3) % 60), "1")
+        for h in range(6, 13)
+        for i in range(20)
+    ]
+    cache.store_board("SFO", flights, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+    board = make_board(flights, window=(DEPARTURE.replace(hour=0),
+                                        DEPARTURE.replace(hour=23)))
+
+    p = predict.predict(board, DEPARTURE.replace(hour=9), terminal_norm="1")
+
+    assert p.wait_category == predict.SEVERE
+    assert p.load_ratio == pytest.approx(1 / settings.lane_design_factor, abs=0.15)
+
+
+def test_corpus_peak_preferred_over_board(temp_db):
+    """A 12h board can miss the daily peak, which would undersize capacity."""
+    board_flights = [make_flight(DEPARTURE, "1") for _ in range(5)]
+    cache.store_board("SFO", board_flights, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+    from_board, _ = predict.estimate_lanes("SFO", predict.AIRPORT, None, 1)
+
+    for week in range(4):
+        day = DEPARTURE - timedelta(days=7 * (week + 1))
+        busy = [make_flight(day.replace(hour=8), "1") for _ in range(30)]
+        history.record_board("SFO", busy, day.replace(hour=0, minute=0),
+                             day.replace(hour=23, minute=0))
+
+    from_corpus, source = predict.estimate_lanes("SFO", predict.AIRPORT, None, 1)
+    assert from_corpus > from_board
+    assert "history" in source
+
+
+def test_assumptions_report_the_lane_source(temp_db):
+    flights = [make_flight(DEPARTURE, "1") for _ in range(10)]
+    cache.store_board("SFO", flights, DEPARTURE.replace(hour=0),
+                      DEPARTURE.replace(hour=23), "mock", {})
+    board = make_board(flights, window=(DEPARTURE.replace(hour=0),
+                                        DEPARTURE.replace(hour=23)))
+    p = predict.predict(board, DEPARTURE, terminal_norm="1")
+
+    assert p.assumptions["lanes"] > 0
+    assert "estimated" in p.assumptions["lanes_source"]

@@ -267,6 +267,32 @@ def baseline_for_window(
     )
 
 
+def peak_hourly_departures(iata: str, terminal_norm: str | None = None) -> float | None:
+    """Busiest hour ever observed, from accumulated history.
+
+    Better than the cached board for sizing capacity: a 12-hour window can miss
+    the real daily peak entirely, which would undersize the checkpoint and
+    overstate every wait. Returns None until enough days have been seen for the
+    figure to mean anything.
+    """
+    terminal = terminal_norm or AIRPORT_AGGREGATE
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(avg_flights) AS peak, MAX(sample_count) AS samples
+            FROM terminal_density_history
+            WHERE iata = ? AND terminal_norm = ?
+            """,
+            (iata.upper(), terminal),
+        ).fetchone()
+
+    if row is None or row["peak"] is None:
+        return None
+    if (row["samples"] or 0) < settings.min_samples_for_baseline:
+        return None
+    return float(row["peak"])
+
+
 def corpus_stats() -> dict:
     with db.connect() as conn:
         density = conn.execute(
